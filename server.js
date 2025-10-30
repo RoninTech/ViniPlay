@@ -1786,7 +1786,9 @@ app.get('/stream', requireAuth, async (req, res) => {
     
     console.log(`[STREAM] Using Profile='${profile.name}' (ID=${profile.id}), UserAgent='${userAgent.name}'`);
 
-    const commandTemplate = profile.command
+  // Prefix ffmpeg command with "-v level+{loglevel}" here to control log spamming.
+  // Using warning loglevel limits messages to actual warnings and errors.
+    const commandTemplate = "-v level+warning " + profile.command
         .replace(/{streamUrl}/g, streamUrl)
         .replace(/{userAgent}|{clientUserAgent}/g, userAgent.value);
         
