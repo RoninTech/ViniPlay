@@ -66,6 +66,7 @@ const LOGS_DIR = path.join(DATA_DIR, 'logs'); // NEW: Log management directory
 const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
 const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
+const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache'); // NEW: VOD poster image cache
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u'); // Renamed
@@ -103,6 +104,7 @@ try {
     if (!fs.existsSync(DVR_DIR)) fs.mkdirSync(DVR_DIR, { recursive: true });
     if (!fs.existsSync(RAW_CACHE_DIR)) fs.mkdirSync(RAW_CACHE_DIR, { recursive: true });
     if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+    if (!fs.existsSync(IMAGE_CACHE_DIR)) fs.mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
     console.log(`[INIT] All required directories checked/created.`);
 } catch (mkdirError) {
     console.error(`[INIT] FATAL: Failed to create necessary directories: ${mkdirError.message}`);
@@ -655,6 +657,8 @@ function getSettings() {
         streamProfiles: [
             { id: 'redirect', name: 'Redirect (No Transcoding)', command: 'redirect', isDefault: true },
             { id: 'ffmpeg-default', name: 'ffmpeg (Built in)', command: '-user_agent "{userAgent}" -i "{streamUrl}" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false },
+            { id: 'ffmpeg-fmp4', name: 'ffmpeg fMP4 (CPU)', command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c:v libx264 -preset ultrafast -c:a aac -b:a 192k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false },
+            { id: 'ffmpeg-fmp4-nvidia', name: 'ffmpeg fMP4 (NVIDIA)', command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a aac -b:a 192k -movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1', isDefault: false },
             { id: 'ffmpeg-nvidia', name: 'ffmpeg (NVIDIA NVENC)', command: '-user_agent "{userAgent}" -re -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a copy -f mpegts pipe:1', isDefault: false },
             { id: 'ffmpeg-nvidia-reconnect', name: 'ffmpeg (NVIDIA reconnect)', command: '-user_agent "{userAgent}" -re -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c:v h264_nvenc -preset p6 -tune hq -c:a copy -f mpegts pipe:1', isDefault: false },
             { id: 'ffmpeg-intel', name: 'ffmpeg (Intel QSV)', command: '-hwaccel qsv -c:v h264_qsv -i "{streamUrl}" -c:v h264_qsv -preset medium -c:a aac -b:a 128k -f mpegts pipe:1', isDefault: false },
@@ -3333,6 +3337,36 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
     });
 });
 
+// HEAD request handler for Shaka Player compatibility
+// Shaka Player sends HEAD requests to probe streams before loading
+app.head('/stream', allowLocalOrAuth, async (req, res) => {
+    const { profileId } = req.query;
+
+    // Determine content type based on profile
+    let settings = getSettings();
+    let profile = (settings.streamProfiles || []).find(p => p.id === profileId);
+    if (!profile) {
+        profile = (settings.castProfiles || []).find(p => p.id === profileId);
+    }
+
+    if (!profile) {
+        return res.status(404).end();
+    }
+
+    // Set appropriate Content-Type header for HEAD request
+    if (profile.command.includes('-f mp4')) {
+        res.setHeader('Content-Type', 'video/mp4');
+    } else {
+        res.setHeader('Content-Type', 'video/mp2t');
+    }
+
+    // Set CORS headers for Shaka Player
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Type, Content-Length');
+
+    res.status(200).end();
+});
+
 // ============================================================
 // CAST: Generate authentication token for Chromecast
 // ============================================================
@@ -4577,6 +4611,112 @@ app.get('/api/public-ip', requireAuth, (req, res) => {
         res.status(500).json({ error: 'Could not fetch public IP address.' });
     });
 });
+
+// --- Image Proxy Endpoint (for VOD posters) ---
+// Proxies HTTP/HTTPS images to avoid mixed content warnings
+// Now with server-side disk caching for performance
+app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
+    const imageUrl = req.query.url;
+
+    if (!imageUrl) {
+        return res.status(400).send('Missing url parameter');
+    }
+
+    // Validate URL
+    try {
+        new URL(imageUrl);
+    } catch (err) {
+        return res.status(400).send('Invalid URL');
+    }
+
+    // Generate a cache filename based on the URL hash
+    const urlHash = crypto.createHash('sha256').update(imageUrl).digest('hex');
+    const cacheFilePath = path.join(IMAGE_CACHE_DIR, urlHash);
+    const cacheMetaPath = path.join(IMAGE_CACHE_DIR, `${urlHash}.meta`);
+
+    // Check if image exists in cache
+    if (fs.existsSync(cacheFilePath) && fs.existsSync(cacheMetaPath)) {
+        try {
+            const meta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf-8'));
+            console.log(`[IMAGE_PROXY] Serving from cache: ${imageUrl}`);
+
+            // Set headers from cached metadata
+            res.setHeader('Content-Type', meta.contentType);
+            res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days for cached images
+            res.setHeader('X-Cache', 'HIT');
+
+            // Stream cached file
+            const fileStream = fs.createReadStream(cacheFilePath);
+            fileStream.pipe(res);
+
+            fileStream.on('error', (err) => {
+                console.error(`[IMAGE_PROXY] Error reading cached file:`, err.message);
+                // If cache is corrupted, delete and fall through to fetch
+                try {
+                    fs.unlinkSync(cacheFilePath);
+                    fs.unlinkSync(cacheMetaPath);
+                } catch (e) { }
+                res.status(500).send('Cache read error');
+            });
+
+            return;
+        } catch (err) {
+            console.error(`[IMAGE_PROXY] Error reading cache metadata:`, err.message);
+            // Fall through to fetch fresh
+        }
+    }
+
+    console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
+
+    // Determine protocol (http or https)
+    const protocol = imageUrl.startsWith('https') ? https : http;
+
+    protocol.get(imageUrl, (imageRes) => {
+        // Check if response is an image
+        const contentType = imageRes.headers['content-type'];
+        if (!contentType || !contentType.startsWith('image/')) {
+            console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
+            return res.status(400).send('URL does not point to an image');
+        }
+
+        // Set response headers
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
+        res.setHeader('X-Cache', 'MISS');
+
+        // Create write stream to save to cache
+        const fileStream = fs.createWriteStream(cacheFilePath);
+
+        // Pipe to both cache and response
+        imageRes.pipe(fileStream);
+        imageRes.pipe(res);
+
+        // Save metadata when done
+        fileStream.on('finish', () => {
+            const meta = {
+                url: imageUrl,
+                contentType: contentType,
+                cachedAt: new Date().toISOString()
+            };
+            try {
+                fs.writeFileSync(cacheMetaPath, JSON.stringify(meta, null, 2));
+                console.log(`[IMAGE_PROXY] Cached image: ${urlHash}`);
+            } catch (err) {
+                console.error(`[IMAGE_PROXY] Failed to write cache metadata:`, err.message);
+            }
+        });
+
+        fileStream.on('error', (err) => {
+            console.error(`[IMAGE_PROXY] Error writing to cache:`, err.message);
+            // Continue serving even if cache write fails
+        });
+
+    }).on('error', (err) => {
+        console.error(`[IMAGE_PROXY] Error fetching image from ${imageUrl}:`, err.message);
+        res.status(500).send('Failed to fetch image');
+    });
+});
+
 
 // --- Backup & Restore Endpoints ---
 const settingsUpload = multer({
