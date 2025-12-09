@@ -32,6 +32,8 @@ export const guideState = {
         multiviewLayouts: [], // To store saved layouts for the user
         adminPageSize: 25, // NEW: Default page size for the admin history table
         vodDirectPlayEnabled: false, // Default to false (use mpegts.js/profiles)
+        // Default timezone offset based on browser's timezone (will be overridden by server settings)
+        timezoneOffset: Math.round(-(new Date().getTimezoneOffset() / 60)),
     }, // This will hold both GLOBAL and USER settings, merged.
     guideDurationHours: 48,
     hourWidthPixels: window.innerWidth < 768 ? 200 : 300,
