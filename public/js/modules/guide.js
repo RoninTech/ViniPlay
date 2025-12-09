@@ -384,9 +384,21 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
             return;
         }
 
-        const guideStart = new Date(guideState.currentDate);
-        guideStart.setHours(0, 0, 0, 0);
-        const guideStartUtc = new Date(Date.UTC(guideStart.getUTCFullYear(), guideStart.getUTCMonth(), guideStart.getUTCDate()));
+        // Create a proper UTC midnight for the selected calendar date
+        // We use the local date components (year, month, day) to create a UTC timestamp
+        // IMPORTANT: EPG times are stored in local timezone but with UTC suffix (e.g., "2025-12-02T00:00:00.000Z" means midnight LOCAL time)
+        // So we need to shift the guide start back by the timezone offset to align with the EPG data
+        const selectedDate = new Date(guideState.currentDate);
+        const offset = guideState.settings.timezoneOffset || 0;
+        const offsetMs = offset * 3600000; // Convert hours to milliseconds
+        const guideStartUtc = new Date(Date.UTC(
+            selectedDate.getFullYear(),
+            selectedDate.getMonth(),
+            selectedDate.getDate(),
+            0, 0, 0, 0
+        ) - offsetMs); // Shift back by timezone offset to align with EPG data
+
+
         const timelineWidth = guideState.guideDurationHours * guideState.hourWidthPixels;
         UIElements.guideGrid.style.setProperty('--timeline-width', `${timelineWidth}px`);
         UIElements.guideDateDisplay.textContent = guideState.currentDate.toLocaleDateString([], { weekday: 'short', month: 'long', day: 'numeric' });
@@ -419,7 +431,13 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
         if (!UIElements.guideGrid.querySelector('.time-bar-cell')) {
             const timeBarCell = document.createElement('div');
             timeBarCell.className = 'time-bar-cell';
-            UIElements.guideGrid.appendChild(timeBarCell);
+            // Insert immediately after sticky-corner to ensure it's in the correct grid position (row 1, column 2)
+            const stickyCorner = UIElements.guideGrid.querySelector('.sticky-corner');
+            if (stickyCorner) {
+                stickyCorner.insertAdjacentElement('afterend', timeBarCell);
+            } else {
+                UIElements.guideGrid.appendChild(timeBarCell);
+            }
         }
 
         if (!document.getElementById('now-line')) {
@@ -430,7 +448,6 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
         }
 
         const timeBarCellEl = UIElements.guideGrid.querySelector('.time-bar-cell');
-        console.log('[RENDER_DEBUG] timeBarCellEl found:', !!timeBarCellEl);
         if (timeBarCellEl) {
             timeBarCellEl.innerHTML = '';
             const offset = guideState.settings.timezoneOffset || 0;
@@ -439,9 +456,6 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                 timeBarCellEl.innerHTML += `<div class="absolute top-0 bottom-0 flex items-center justify-start px-2 text-xs text-gray-400 border-r border-gray-700/50" style="left: ${i * guideState.hourWidthPixels}px; width:${guideState.hourWidthPixels}px;">${formatTimeWithOffset(time, offset)}</div>`;
             }
             timeBarCellEl.style.width = `${timelineWidth}px`;
-            console.log('[RENDER_DEBUG] timeBarCellEl populated, width:', timelineWidth);
-        } else {
-            console.log('[RENDER_DEBUG] timeBarCellEl NOT FOUND!');
         }
 
         const guideContainer = UIElements.guideContainer;
@@ -520,7 +534,9 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                 let programsHTML = '';
                 const now = new Date();
                 const guideEnd = new Date(guideStartUtc.getTime() + guideState.guideDurationHours * 3600 * 1000);
-                (guideState.programs[channel.id] || []).forEach(prog => {
+
+                let programCount = 0;
+                (guideState.programs[channel.id] || []).forEach((prog, progIndex) => {
                     const progStart = new Date(prog.start);
                     const progStop = new Date(prog.stop);
                     if (progStop < guideStartUtc || progStart > guideEnd) return;
@@ -528,8 +544,18 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                     const durationMs = progStop - progStart;
                     if (durationMs <= 0) return;
 
-                    const left = ((progStart.getTime() - guideStartUtc.getTime()) / 3600000) * guideState.hourWidthPixels;
-                    const width = (durationMs / 3600000) * guideState.hourWidthPixels;
+                    // Calculate the raw left position (can be negative if program starts before guide)
+                    let left = ((progStart.getTime() - guideStartUtc.getTime()) / 3600000) * guideState.hourWidthPixels;
+                    let width = (durationMs / 3600000) * guideState.hourWidthPixels;
+
+                    // If program starts before the guide's time range, clip it to the visible area
+                    if (left < 0) {
+                        // Adjust width to compensate for the clipped portion
+                        width = width + left; // left is negative, so this reduces the width
+                        left = 0; // Clip to the left edge
+                    }
+                    programCount++;
+
                     const isLive = now >= progStart && now < progStop;
                     const progressWidth = isLive ? ((now - progStart) / durationMs) * 100 : 0;
 
@@ -562,35 +588,37 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
 
         // MODIFIED: Preserve vertical scroll position if not resetting
         const currentScrollTop = guideContainer.scrollTop;
-        console.log('[RENDER_DEBUG] Captured scrollTop at start:', currentScrollTop);
 
         if (resetScroll) {
             guideContainer.scrollTop = 0;
             guideContainer.scrollLeft = 0;
         } else {
             // Restore vertical scroll after a short delay to allow layout update
-            console.log('[SCROLL_DEBUG] Restoring scrollTop:', currentScrollTop);
             requestAnimationFrame(() => {
-                console.log('[SCROLL_DEBUG] Setting scrollTop to:', currentScrollTop, 'Current:', guideContainer.scrollTop);
                 guideContainer.scrollTop = currentScrollTop;
-                console.log('[SCROLL_DEBUG] New scrollTop:', guideContainer.scrollTop);
+
             });
         }
         updateVisibleRows();
-        console.log('[RENDER_DEBUG] About to call updateNowLine with shouldCenter:', shouldCenter);
         updateNowLine(guideStartUtc, shouldCenter);
 
         const nowBtn = UIElements.guideGrid.querySelector('#now-btn');
-        console.log('[RENDER_DEBUG] nowBtn found:', !!nowBtn);
         if (nowBtn) nowBtn.onclick = () => {
             const now = new Date();
             if (guideState.currentDate.toDateString() !== now.toDateString()) {
                 guideState.currentDate = now;
                 finalizeGuideLoad(true);
             } else {
-                const guideStart = new Date(guideState.currentDate);
-                guideStart.setHours(0, 0, 0, 0);
-                const guideStartUtc = new Date(Date.UTC(guideStart.getUTCFullYear(), guideStart.getUTCMonth(), guideStart.getUTCDate()));
+                // Create a proper UTC midnight for the current date (same logic as renderGuide)
+                const selectedDate = new Date(guideState.currentDate);
+                const offset = guideState.settings.timezoneOffset || 0;
+                const offsetMs = offset * 3600000;
+                const guideStartUtc = new Date(Date.UTC(
+                    selectedDate.getFullYear(),
+                    selectedDate.getMonth(),
+                    selectedDate.getDate(),
+                    0, 0, 0, 0
+                ) - offsetMs);
                 updateNowLine(guideStartUtc, true);
             }
         };
@@ -611,6 +639,8 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
     const now = new Date();
     const nowValue = now.getTime();
     const guideEnd = new Date(guideStartUtc.getTime() + guideState.guideDurationHours * 3600 * 1000);
+
+    // Use the actual channel column width from settings for all devices
     const channelInfoColWidth = guideState.settings.channelColumnWidth;
 
     if (nowValue >= guideStartUtc.getTime() && nowValue <= guideEnd.getTime()) {
@@ -659,9 +689,16 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
  * Used when column is resized to recalculate the NOW line position.
  */
 export const updateNowLinePosition = () => {
-    const guideStart = new Date(guideState.currentDate);
-    guideStart.setHours(0, 0, 0, 0);
-    const guideStartUtc = new Date(Date.UTC(guideStart.getUTCFullYear(), guideStart.getUTCMonth(), guideStart.getUTCDate()));
+    // Create a proper UTC midnight for the current date (same logic as renderGuide)
+    const selectedDate = new Date(guideState.currentDate);
+    const offset = guideState.settings.timezoneOffset || 0;
+    const offsetMs = offset * 3600000;
+    const guideStartUtc = new Date(Date.UTC(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+        0, 0, 0, 0
+    ) - offsetMs);
     updateNowLine(guideStartUtc, false);
 };
 
