@@ -55,16 +55,14 @@ export function formatTimeWithOffset(date, offsetHours = 0) {
         date = new Date(date);
     }
 
-    // Calculate the UTC time in milliseconds
-    const utcTime = date.getTime() + (date.getTimezoneOffset() * 60000);
+    // Apply the user's desired offset directly to the input timestamp
+    // This assumes the input date is already in the correct base time (typically UTC)
+    const adjustedTime = new Date(date.getTime() + (offsetHours * 3600000));
 
-    // Apply the desired offset
-    const targetTime = new Date(utcTime + (offsetHours * 3600000));
+    // Use UTC methods for consistent, device-independent formatting
+    // This ensures identical results regardless of viewport size, browser, or device locale
+    const hours = adjustedTime.getUTCHours().toString().padStart(2, '0');
+    const minutes = adjustedTime.getUTCMinutes().toString().padStart(2, '0');
 
-    // Format the time using toLocaleTimeString with specified options for consistency
-    return targetTime.toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false // Using 24-hour format for simplicity
-    });
+    return `${hours}:${minutes}`;
 }
