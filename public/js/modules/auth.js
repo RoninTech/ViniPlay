@@ -87,6 +87,13 @@ const initializeUIElements = () => {
     UIElements.saveLayoutName = document.getElementById('save-layout-name');
     UIElements.saveLayoutCancelBtn = document.getElementById('save-layout-cancel-btn');
     UIElements.multiviewChannelFilter = document.getElementById('multiview-channel-filter');
+    // NEW: Multi-view custom URL elements
+    UIElements.multiviewSourceListBtn = document.getElementById('multiview-source-list-btn');
+    UIElements.multiviewSourceCustomBtn = document.getElementById('multiview-source-custom-btn');
+    UIElements.multiviewCustomUrlContainer = document.getElementById('multiview-custom-url-container');
+    UIElements.multiviewCustomUrlInput = document.getElementById('multiview-custom-url-input');
+    UIElements.multiviewCustomNameInput = document.getElementById('multiview-custom-name-input');
+    UIElements.multiviewCustomUrlPlayBtn = document.getElementById('multiview-custom-url-play-btn');
 
     // NEW: Player Page Elements
     UIElements.pagePlayer = document.getElementById('page-player');
