@@ -417,7 +417,7 @@ export const updateUIFromSettings = async () => {
     // Filter stream profiles based on detected hardware
     const allProfiles = settings.streamProfiles || [];
     const filteredProfiles = allProfiles.filter(p => {
-        // Always show default/basic profiles (but NOT ffmpeg-cast, which is for Chromecast only)
+        // Always show default/basic profiles (but NOT ffmpeg-cast or fMP4 profiles)
         if (['redirect', 'ffmpeg-default'].includes(p.id)) return true;
 
         // Show NVIDIA profiles only if NVIDIA GPU detected
@@ -432,11 +432,8 @@ export const updateUIFromSettings = async () => {
         // Show AMD/Radeon VAAPI profiles only if Radeon VAAPI detected
         if (p.id === 'ffmpeg-vaapi-amd' && hardware?.radeon_vaapi) return true;
 
-        // Hide others by default if they look like hardware profiles but hardware not found
-        // If user added a custom profile that doesn't match these IDs, show it?
-        // Let's assume custom profiles don't use these reserved IDs, so we show them.
-        // But for safety, if it's one of the known hardware IDs and we didn't match above, hide it.
-        const knownHardwareIds = ['ffmpeg-nvidia', 'ffmpeg-nvidia-reconnect', 'ffmpeg-intel', 'ffmpeg-vaapi', 'ffmpeg-vaapi-amd'];
+        // Hide hardware profiles and auto-selected Direct Player profiles (fMP4)
+        const knownHardwareIds = ['ffmpeg-nvidia', 'ffmpeg-nvidia-reconnect', 'ffmpeg-intel', 'ffmpeg-vaapi', 'ffmpeg-vaapi-amd', 'ffmpeg-fmp4', 'ffmpeg-fmp4-nvidia'];
         if (knownHardwareIds.includes(p.id)) return false;
 
         return true; // Show custom profiles
