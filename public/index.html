@@ -8,6 +8,8 @@
     <link rel="icon" type="image/png" href="/viniplay.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
+    <!-- Shaka Player for VOD playback -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.0/shaka-player.compiled.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/fuse.js/dist/fuse.min.js"></script>
     <!-- NEW: Google Cast Framework -->
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
@@ -421,6 +423,8 @@
         .time-bar-cell {
             position: sticky;
             top: 0;
+            left: 0;
+            /* Reset position */
             z-index: 25;
             background-color: #111827;
             height: 64px;
@@ -429,6 +433,8 @@
             border-bottom: 1px solid #374151;
             box-sizing: border-box;
             overflow: hidden;
+            grid-column: 2;
+            /* Explicitly place in second column */
         }
 
         .channel-info {
@@ -459,9 +465,7 @@
         }
 
         @media (max-width: 767px) {
-            #guide-grid {
-                grid-template-columns: 64px 1fr;
-            }
+            /* Removed grid-template-columns override - let it use var(--channel-col-width) from main grid definition */
 
             .channel-info {
                 width: 64px;
@@ -1405,8 +1409,9 @@
                     <div class="bg-gray-800 p-4 sm:p-6 rounded-xl shadow-lg">
                         <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Direct Stream Player
                         </h2>
-                        <p class="text-sm text-gray-400 mb-4">Enter a direct URL to a `.ts` or `.m3u8` stream to play it
-                            here.</p>
+                        <p class="text-sm text-gray-400 mb-4">Enter a direct URL to any video stream or file (.m3u8,
+                            .ts, .mp4, .mkv, etc.). Use Direct Play for browser-native formats or uncheck to use server
+                            transcoding.</p>
                         <form id="direct-player-form" class="space-y-4">
                             <div class="flex flex-col sm:flex-row items-end gap-3">
                                 <div class="flex-grow w-full">
@@ -2455,8 +2460,41 @@
                         <option value="recents">Recents</option>
                     </select>
                 </div>
+
+                <!-- NEW: Tab Toggle for "From List" vs "Custom URL" -->
+                <div class="flex border border-gray-600 rounded-md overflow-hidden mb-4">
+                    <button type="button" id="multiview-source-list-btn"
+                        class="flex-1 py-2 text-sm bg-gray-700 text-white font-medium">From List</button>
+                    <button type="button" id="multiview-source-custom-btn"
+                        class="flex-1 py-2 text-sm text-gray-300 hover:bg-gray-700/50">Custom URL</button>
+                </div>
+
+                <!-- Search Input (visible for "From List" tab) -->
                 <input type="search" id="channel-selector-search" placeholder="Search channels..."
                     class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500">
+
+                <!-- NEW: Custom URL Input (hidden by default) -->
+                <div id="multiview-custom-url-container" class="hidden space-y-3">
+                    <div>
+                        <label for="multiview-custom-url-input"
+                            class="block text-sm font-medium text-gray-400 mb-2">Stream URL</label>
+                        <input type="url" id="multiview-custom-url-input"
+                            placeholder="https://example.com/stream.m3u8 or .mkv"
+                            class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+
+                    <div>
+                        <label for="multiview-custom-name-input"
+                            class="block text-sm font-medium text-gray-400 mb-2">Display Name (Optional)</label>
+                        <input type="text" id="multiview-custom-name-input" placeholder="My Custom Stream"
+                            class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+
+                    <button type="button" id="multiview-custom-url-play-btn"
+                        class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors">
+                        Load Stream
+                    </button>
+                </div>
             </div>
             <div id="channel-selector-list" class="flex-grow p-2 overflow-y-auto custom-scrollbar"></div>
             <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4 rounded-b-lg flex-shrink-0">
