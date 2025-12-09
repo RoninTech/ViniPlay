@@ -151,11 +151,14 @@ function renderVodGrid() {
             const displayGroup = item.group || 'Uncategorized';
             const displayLogo = item.logo || placeholderImageUrl;
 
+            // Use image proxy for both HTTP and HTTPS posters to avoid mixed content warnings
+            const proxiedLogo = displayLogo.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(displayLogo)}` : displayLogo;
+
             return `
                 <div class="vod-item" data-id="${itemIdStr}">
                     <span class="vod-type-badge">${itemType}</span>
                     <div class="vod-item-poster">
-                        <img src="${displayLogo}"
+                        <img src="${proxiedLogo}"
                              alt="${displayName.replace(/"/g, '&quot;')}"
                              onerror="this.onerror=null; this.src='${placeholderImageUrl}'; this.style.objectFit='cover';">
                     </div>
@@ -182,10 +185,15 @@ function renderVodGrid() {
 async function openVodDetails(item) { // Make the function async
     if (!item) return;
 
-    // --- Common Fields (No Change) ---
+    // --- Common Fields (with image proxy) ---
     UIElements.vodDetailsTitle.textContent = item.name;
-    UIElements.vodDetailsPoster.src = item.logo || `https://placehold.co/400x600/1f2937/d1d5db?text=${encodeURIComponent(item.name)}`;
-    UIElements.vodDetailsBackdropImg.src = item.logo || '';
+
+    // Use image proxy for modal posters/backdrops
+    const posterUrl = item.logo || `https://placehold.co/400x600/1f2937/d1d5db?text=${encodeURIComponent(item.name)}`;
+    const proxiedPoster = posterUrl.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(posterUrl)}` : posterUrl;
+    UIElements.vodDetailsPoster.src = proxiedPoster;
+    UIElements.vodDetailsBackdropImg.src = item.logo ? proxiedPoster : '';
+
     UIElements.vodDetailsYear.textContent = item.year || '';
     UIElements.vodDetailsRating.textContent = ''; // Placeholder
     UIElements.vodDetailsDuration.textContent = ''; // Placeholder
@@ -216,7 +224,7 @@ async function openVodDetails(item) { // Make the function async
             closeModal(UIElements.vodDetailsModal);
         };
 
-    // --- Series Logic (Lazy Loading) ---
+        // --- Series Logic (Lazy Loading) ---
     } else if (item.type === 'series') {
         UIElements.vodDetailsType.textContent = 'Series';
         UIElements.vodDetailsSeriesActions.classList.remove('hidden'); // Show series section immediately
@@ -335,7 +343,7 @@ function setupVodEventListeners() {
         clearTimeout(vodState.searchDebounce);
         vodState.searchDebounce = setTimeout(renderVodGrid, 300);
     });
-    
+
     UIElements.vodDirectPlayCheckbox.addEventListener('change', () => {
         const isEnabled = UIElements.vodDirectPlayCheckbox.checked;
         guideState.settings.vodDirectPlayEnabled = isEnabled;
@@ -353,7 +361,7 @@ function setupVodEventListeners() {
         // Listener for page size change is initially attached here and re-attached on render
         const pageSizeSelect = paginationContainer.querySelector('#vod-page-size-select');
         if (pageSizeSelect) {
-             pageSizeSelect.addEventListener('change', changeVodPageSize);
+            pageSizeSelect.addEventListener('change', changeVodPageSize);
         }
     }
 
@@ -434,7 +442,7 @@ function renderVodPaginationControls() {
     }
 
     if (totalPages > 1) {
-       pagesHTML += `<li><button class="pagination-btn page-number-btn ${totalPages === currentPage ? 'active' : ''}" data-page="${totalPages}">${totalPages}</button></li>`;
+        pagesHTML += `<li><button class="pagination-btn page-number-btn ${totalPages === currentPage ? 'active' : ''}" data-page="${totalPages}">${totalPages}</button></li>`;
     }
 
 
@@ -469,19 +477,19 @@ function renderVodPaginationControls() {
     const paginationPages = controlsContainer.querySelector('#vod-pagination-pages');
     if (paginationPages) {
         paginationPages.addEventListener('click', (e) => {
-             const button = e.target.closest('button');
-             if (!button || button.disabled) return;
+            const button = e.target.closest('button');
+            if (!button || button.disabled) return;
 
-             if (button.classList.contains('prev-page-btn')) {
-                 goToVodPage(vodState.pagination.currentPage - 1);
-             } else if (button.classList.contains('next-page-btn')) {
-                 goToVodPage(vodState.pagination.currentPage + 1);
-             } else if (button.classList.contains('page-number-btn')) {
-                 const pageNum = parseInt(button.dataset.page, 10);
-                 if (pageNum) {
-                     goToVodPage(pageNum);
-                 }
-             }
+            if (button.classList.contains('prev-page-btn')) {
+                goToVodPage(vodState.pagination.currentPage - 1);
+            } else if (button.classList.contains('next-page-btn')) {
+                goToVodPage(vodState.pagination.currentPage + 1);
+            } else if (button.classList.contains('page-number-btn')) {
+                const pageNum = parseInt(button.dataset.page, 10);
+                if (pageNum) {
+                    goToVodPage(pageNum);
+                }
+            }
         });
     }
 }
