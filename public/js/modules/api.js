@@ -61,6 +61,10 @@ export async function fetchConfig() {
         return null;
     }
 
+    // DEBUG: Log headers to check for cache status
+    console.log('[DEBUG_CLIENT] /api/config Response Headers:');
+    response.headers.forEach((val, key) => console.log(`  ${key}: ${val}`));
+
     try {
         const config = await response.json();
         console.log('[API] Application configuration fetched successfully.');
