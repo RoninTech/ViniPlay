@@ -16,6 +16,12 @@ let currentSourceTypeForEditor = 'url';
 let hardwareChecked = false; // Flag to prevent re-checking hardware on every UI update
 let detectedHardwareInfo = null; // Store detected hardware info
 
+// --- Group Filter State ---
+let tempSelectedGroups = new Set();
+let currentGroupEditorContext = null; // 'source-editor' or 'user-editor'
+let currentGroupSourceId = null;
+
+
 /**
  * Fetches the server's public IP and displays it.
  */
@@ -268,6 +274,352 @@ async function handleHardwareDetection() {
 
 
 // --- UI Rendering ---
+
+/**
+ * Renders the source list for the User Editor Modal.
+ * @param {object|null} user - The user object (null for new user).
+ */
+const renderUserSourceList = (user) => {
+    const listEl = UIElements.userEditorSourceList;
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    const m3uSources = guideState.settings.m3uSources || [];
+    // Only M3U sources act as content providers we filter. EPG sources are just metadata.
+    // If strict EPG filtering is needed, we can add them, but usually they are 1-1 with M3U or global.
+    // Focusing on M3U sources for access control.
+
+    if (m3uSources.length === 0) {
+        listEl.innerHTML = `<tr><td colspan="3" class="text-center text-gray-500 py-4">No sources available.</td></tr>`;
+        return;
+    }
+
+    let allowedSources = null;
+    if (user && user.allowed_sources) {
+        try {
+            allowedSources = JSON.parse(user.allowed_sources);
+        } catch (e) {
+            console.error("Error parsing user allowed_sources:", e);
+        }
+    }
+
+    m3uSources.forEach(source => {
+        // PERMISSION LOGIC:
+        // If allowedSources is null (legacy or admin-like), default to ALLOWED.
+        // If allowedSources exists, check if this source is in it.
+        // For NEW users (user is null), default to ALLOWED (or user choice, but UI defaults to checked).
+
+        let isAllowed = true;
+        let groupCount = 0;
+        let selectedGroups = [];
+
+        if (allowedSources) {
+            // If permissions exist, strict whitelist.
+            if (allowedSources[source.id] && allowedSources[source.id].allowed) {
+                isAllowed = true;
+                selectedGroups = allowedSources[source.id].groups || [];
+                groupCount = selectedGroups.length;
+            } else {
+                isAllowed = false;
+            }
+        }
+        // If !allowedSources, we assume full access, so isAllowed=true, groupCount=0 (all).
+
+        const tr = document.createElement('tr');
+        tr.className = "hover:bg-gray-700/30 transition-colors";
+        tr.dataset.sourceId = source.id;
+        tr.innerHTML = `
+            <td class="px-3 py-2 text-center">
+                <input type="checkbox" class="user-source-checkbox h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500" ${isAllowed ? 'checked' : ''}>
+            </td>
+            <td class="px-3 py-2 text-gray-300 font-medium">${source.name}</td>
+            <td class="px-3 py-2 text-right">
+                <button type="button" class="user-group-filter-btn text-xs font-bold py-1 px-3 rounded-full transition-colors ${isAllowed ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-gray-600 text-gray-400 cursor-not-allowed'}" ${isAllowed ? '' : 'disabled'}>
+                    ${groupCount > 0 ? `${groupCount} Groups` : 'All Groups'}
+                </button>
+            </td>
+        `;
+
+        // Store current groups on the button or row for easy access
+        // We'll attach it to the DOM element property to avoid parsing JSON in attributes
+        const btn = tr.querySelector('.user-group-filter-btn');
+        btn.dataset.sourceId = source.id;
+        btn._selectedGroups = selectedGroups; // Direct property assignment
+
+        // Checkbox listener to toggle button state
+        const checkbox = tr.querySelector('.user-source-checkbox');
+        checkbox.addEventListener('change', (e) => {
+            const checked = e.target.checked;
+            btn.disabled = !checked;
+            btn.classList.toggle('bg-blue-600', checked);
+            btn.classList.toggle('hover:bg-blue-500', checked);
+            btn.classList.toggle('text-white', checked);
+            btn.classList.toggle('bg-gray-600', !checked);
+            btn.classList.toggle('text-gray-400', !checked);
+            btn.classList.toggle('cursor-not-allowed', !checked);
+        });
+
+        // Button listener
+        btn.addEventListener('click', () => {
+            openUserGroupFilterModal(source.id, btn._selectedGroups, source.name, btn);
+        });
+
+        listEl.appendChild(tr);
+    });
+};
+
+/**
+ * Opens the Group Filter Modal for a User.
+ */
+const openUserGroupFilterModal = async (sourceId, selectedGroups, sourceName, btnElement) => {
+    currentGroupEditorContext = 'user-editor';
+    currentGroupSourceId = sourceId;
+
+    // We need to fetch ALL groups for this source validation
+
+    UIElements.groupFilterModal.querySelector('h3').textContent = `Select Groups for ${sourceName}`;
+
+    // Show loading state
+    btnElement.textContent = 'Loading...';
+    btnElement.disabled = true;
+
+    try {
+        // We need the Source Object to send to /api/sources/fetch-groups
+        const source = guideState.settings.m3uSources.find(s => s.id === sourceId);
+        if (!source) throw new Error("Source not found");
+
+        const payload = {
+            type: source.type,
+            sourceId: source.id
+        };
+
+        if (source.type === 'url') {
+            payload.url = source.path;
+        } else if (source.type === 'xc') {
+            payload.xc = source.xc_data;
+        } else if (source.type === 'file') {
+            // For existing file sources, pass the path as 'url' (as per server logic)
+            payload.url = source.path;
+        }
+
+        const res = await apiFetch('/api/sources/fetch-groups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        let allGroups = [];
+        if (res && res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data)) {
+                allGroups = data;
+            } else if (data.groups) {
+                allGroups = data.groups;
+            }
+        } else {
+            // Fallback: extract from client state if available
+            const sourceChannels = guideState.channels.filter(c => c.sourceId === sourceId);
+            if (sourceChannels.length > 0) {
+                allGroups = [...new Set(sourceChannels.map(c => c.group))];
+            }
+        }
+
+        // --- FIX: Filter by Source's Own Whitelist ---
+        // If the source itself is configured to only import specific groups,
+        // we should only offer those groups to the user.
+        console.log(`[DEBUG_USER_FILTER] Type of selectedGroups: ${typeof source.selectedGroups}`, source.selectedGroups);
+        if (source.selectedGroups && source.selectedGroups.length > 0) {
+            // Ensure strict type check (it should be an array)
+            if (typeof source.selectedGroups === 'string') {
+                try { source.selectedGroups = JSON.parse(source.selectedGroups); } catch (e) { }
+            }
+            if (Array.isArray(source.selectedGroups)) {
+                allGroups = allGroups.filter(g => source.selectedGroups.includes(g));
+            }
+        }
+
+        // If we still have no groups, maybe just show the passed selected groups?
+        if (allGroups.length === 0 && selectedGroups.length > 0) {
+            allGroups = [...selectedGroups];
+        }
+
+        populateUserGroupFilterModal(allGroups, selectedGroups);
+        const modal = document.getElementById('user-group-filter-modal');
+        openModal(modal);
+
+        // Attach the btnElement to the modal so we can update it on save
+        modal._triggerBtn = btnElement;
+
+    } catch (e) {
+        showNotification("Failed to fetch groups: " + e.message, true);
+    } finally {
+        btnElement.textContent = selectedGroups.length > 0 ? `${selectedGroups.length} Groups` : 'All Groups';
+        btnElement.disabled = false;
+    }
+};
+
+// --- Reusable Group Filter Logic ---
+
+const populateGroupFilterModal = (allGroups, selectedGroups) => {
+    tempSelectedGroups.clear();
+    selectedGroups.forEach(group => tempSelectedGroups.add(group));
+    const groups = { live: [], movie: [], series: [] };
+
+    allGroups.forEach(group => {
+        const gLower = group.toLowerCase();
+        if (gLower.includes('movie') || gLower.includes('film') || gLower.includes('vod')) {
+            groups.movie.push(group);
+        } else if (gLower.includes('series') || gLower.includes('show') || gLower.includes('tv')) {
+            groups.series.push(group);
+        } else {
+            groups.live.push(group);
+        }
+    });
+
+    UIElements.groupFilterModal.dataset.groups = JSON.stringify(groups);
+    UIElements.groupFilterTabLive.textContent = `Live (${groups.live.length})`;
+    UIElements.groupFilterTabMovies.textContent = `VOD - Movies (${groups.movie.length})`;
+    UIElements.groupFilterTabSeries.textContent = `VOD - Series (${groups.series.length})`;
+
+    updateGroupFilterList('live', Array.from(tempSelectedGroups));
+    UIElements.groupFilterTabLive.classList.add('active');
+    UIElements.groupFilterTabMovies.classList.remove('active');
+    UIElements.groupFilterTabSeries.classList.remove('active');
+    UIElements.groupFilterSearch.value = '';
+};
+
+// --- NEW: Dedicated Helper Functions for User Group Filter to ensure isolation ---
+
+const populateUserGroupFilterModal = (allGroups, selectedGroups) => {
+    tempSelectedGroups.clear();
+    selectedGroups.forEach(group => tempSelectedGroups.add(group));
+    const groups = { live: [], movie: [], series: [] };
+
+    allGroups.forEach(group => {
+        const gLower = group.toLowerCase();
+        if (gLower.includes('movie') || gLower.includes('film') || gLower.includes('vod')) {
+            groups.movie.push(group);
+        } else if (gLower.includes('series') || gLower.includes('show') || gLower.includes('tv')) {
+            groups.series.push(group);
+        } else {
+            groups.live.push(group);
+        }
+    });
+
+    const modal = document.getElementById('user-group-filter-modal');
+    modal.dataset.groups = JSON.stringify(groups);
+
+    // Update User Modal Tabs
+    document.getElementById('user-group-filter-tab-live').textContent = `Live (${groups.live.length})`;
+    document.getElementById('user-group-filter-tab-movies').textContent = `VOD - Movies (${groups.movie.length})`;
+    document.getElementById('user-group-filter-tab-series').textContent = `VOD - Series (${groups.series.length})`;
+
+    updateUserGroupFilterList('live', Array.from(tempSelectedGroups));
+
+    // Reset Tab State
+    document.getElementById('user-group-filter-tab-live').classList.add('active', 'bg-blue-600', 'text-white');
+    document.getElementById('user-group-filter-tab-movies').classList.remove('active', 'bg-blue-600', 'text-white');
+    document.getElementById('user-group-filter-tab-series').classList.remove('active', 'bg-blue-600', 'text-white');
+    document.getElementById('user-group-filter-search').value = '';
+};
+
+const updateUserGroupFilterList = (type, selectedGroups, searchTerm = '') => {
+    const listEl = document.getElementById('user-group-filter-list');
+    const modal = document.getElementById('user-group-filter-modal');
+    const allCategorizedGroups = JSON.parse(modal.dataset.groups || '{}');
+    const groupsForType = allCategorizedGroups[type] || [];
+    const re = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    const filteredGroups = groupsForType.filter(g => re.test(g));
+    const currentSelectedSet = new Set(selectedGroups);
+
+    if (filteredGroups.length === 0) {
+        listEl.innerHTML = `<p class="text-gray-500 col-span-full text-center">No groups found.</p>`;
+        return;
+    }
+
+    listEl.innerHTML = filteredGroups.map(group => `
+        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
+            ${group}
+        </div>
+    `).join('');
+};
+
+const switchUserGroupFilterTab = (type) => {
+    // Sync current selection first
+    const listEl = document.getElementById('user-group-filter-list');
+    const currentListItems = listEl.querySelectorAll('.group-filter-item');
+    currentListItems.forEach(item => {
+        const groupName = item.dataset.groupName;
+        if (item.classList.contains('selected')) {
+            tempSelectedGroups.add(groupName);
+        } else {
+            tempSelectedGroups.delete(groupName);
+        }
+    });
+
+    const tabs = {
+        'live': document.getElementById('user-group-filter-tab-live'),
+        'movie': document.getElementById('user-group-filter-tab-movies'),
+        'series': document.getElementById('user-group-filter-tab-series')
+    };
+
+    Object.keys(tabs).forEach(t => {
+        const tab = tabs[t];
+        if (type === t) {
+            tab.classList.add('active', 'bg-blue-600', 'text-white');
+            tab.classList.remove('bg-gray-700', 'text-gray-400');
+        } else {
+            tab.classList.remove('active', 'bg-blue-600', 'text-white');
+            tab.classList.add('bg-gray-700', 'text-gray-400');
+        }
+    });
+
+    updateUserGroupFilterList(type, Array.from(tempSelectedGroups), document.getElementById('user-group-filter-search').value);
+};
+
+
+const updateGroupFilterList = (type, selectedGroups, searchTerm = '') => {
+    const listEl = UIElements.groupFilterList;
+    const allCategorizedGroups = JSON.parse(UIElements.groupFilterModal.dataset.groups || '{}');
+    const groupsForType = allCategorizedGroups[type] || [];
+    const re = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); // Safe regex
+    const filteredGroups = groupsForType.filter(g => re.test(g));
+    const currentSelectedSet = new Set(selectedGroups);
+
+    if (filteredGroups.length === 0) {
+        listEl.innerHTML = `<p class="text-gray-500 col-span-full text-center">No groups found.</p>`;
+        return;
+    }
+
+    listEl.innerHTML = filteredGroups.map(group => `
+        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
+            ${group}
+        </div>
+    `).join('');
+};
+
+const switchGroupFilterTab = (type) => {
+    const currentListItems = UIElements.groupFilterList.querySelectorAll('.group-filter-item');
+    currentListItems.forEach(item => {
+        const groupName = item.dataset.groupName;
+        if (item.classList.contains('selected')) {
+            tempSelectedGroups.add(groupName);
+        } else {
+            tempSelectedGroups.delete(groupName);
+        }
+    });
+    UIElements.groupFilterTabLive.classList.toggle('active', type === 'live');
+    UIElements.groupFilterTabMovies.classList.toggle('active', type === 'movie');
+    UIElements.groupFilterTabSeries.classList.toggle('active', type === 'series');
+
+    updateGroupFilterList(type, Array.from(tempSelectedGroups), UIElements.groupFilterSearch.value);
+
+    UIElements.groupFilterTabLive.className = `group-filter-tab-btn tab-button ${type === 'live' ? 'active bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`;
+    UIElements.groupFilterTabMovies.className = `group-filter-tab-btn tab-button ${type === 'movie' ? 'active bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`;
+    UIElements.groupFilterTabSeries.className = `group-filter-tab-btn tab-button ${type === 'series' ? 'active bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`;
+};
+
+
 
 /**
  * Populates the timezone selector dropdown.
@@ -561,6 +913,7 @@ const openUserEditor = (user = null) => {
     UIElements.userEditorCanUseDvr.checked = user ? user.canUseDvr : false;
     UIElements.userEditorTitle.textContent = user ? 'Edit User' : 'Add New User';
     UIElements.userEditorError.classList.add('hidden');
+    renderUserSourceList(user);
     openModal(UIElements.userEditorModal);
 };
 
@@ -638,6 +991,72 @@ const openSourceEditor = (sourceType, source = null) => {
         if (btnSpan) {
             btnSpan.textContent = count > 0 ? `${count} Groups Selected` : 'Select Groups';
         }
+    }
+
+    // Attach listener for the new button
+    const filterGroupsBtn = document.getElementById('source-editor-filter-groups-btn');
+    if (filterGroupsBtn) {
+        filterGroupsBtn.addEventListener('click', async () => {
+            const selectedGroupsInput = document.getElementById('source-editor-selected-groups');
+            const currentSelected = JSON.parse(selectedGroupsInput.value || '[]');
+            const sourceName = UIElements.sourceEditorName.value || 'Source';
+
+            // Initial UI state
+            const originalText = filterGroupsBtn.querySelector('span').textContent;
+            filterGroupsBtn.querySelector('span').textContent = 'Loading...';
+            filterGroupsBtn.disabled = true;
+
+            currentGroupEditorContext = 'source-editor';
+            currentGroupSourceId = null; // Not needed for source editor as we read from form
+
+            try {
+                const payload = {
+                    type: currentSourceTypeForEditor, // Use 'type' not 'sourceType'
+                };
+
+                if (currentSourceTypeForEditor === 'url') {
+                    payload.url = UIElements.sourceEditorUrl.value;
+                } else if (currentSourceTypeForEditor === 'xc') {
+                    payload.xc = JSON.stringify({
+                        server: UIElements.sourceEditorXcUrl.value,
+                        username: UIElements.sourceEditorXcUsername.value,
+                        password: UIElements.sourceEditorXcPassword.value,
+                    });
+                }
+                // File sources: fetch-groups only works if file is already on server (has ID or path knewn)
+                if (source && source.id) {
+                    payload.sourceId = source.id;
+                    if (currentSourceTypeForEditor === 'file' && source.path) {
+                        payload.url = source.path; // Server expects path in 'url' field for file type
+                    }
+                }
+
+                const res = await apiFetch('/api/sources/fetch-groups', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res && res.ok) {
+                    const data = await res.json();
+                    let allGroups = [];
+                    if (Array.isArray(data)) allGroups = data;
+                    else if (data.groups) allGroups = data.groups;
+
+                    UIElements.groupFilterModal.querySelector('h3').textContent = `Select Groups for ${sourceName}`;
+                    populateGroupFilterModal(allGroups, currentSelected);
+                    openModal(UIElements.groupFilterModal);
+                } else {
+                    showNotification("Failed to fetch groups. Ensure URL/Source is valid.", true);
+                }
+            } catch (e) {
+                console.error("Group fetch error:", e);
+                showNotification("Error fetching groups: " + e.message, true);
+            } finally {
+                filterGroupsBtn.querySelector('span').textContent = originalText;
+                filterGroupsBtn.disabled = false;
+            }
+        });
     }
 
     // Hide refresh interval for file-based sources
@@ -1240,7 +1659,29 @@ export function setupSettingsEventListeners() {
             username: UIElements.userEditorUsername.value,
             password: UIElements.userEditorPassword.value,
             isAdmin: UIElements.userEditorIsAdmin.checked,
-            canUseDvr: UIElements.userEditorCanUseDvr.checked
+            canUseDvr: UIElements.userEditorCanUseDvr.checked,
+            // Capture allowed sources
+            allowed_sources: (() => {
+                const map = {};
+                // Iterate through source list
+                const rows = UIElements.userEditorSourceList.querySelectorAll('tr');
+                rows.forEach(row => {
+                    const sourceId = row.dataset.sourceId;
+                    const checkbox = row.querySelector('.user-source-checkbox');
+                    const btn = row.querySelector('.user-group-filter-btn');
+
+                    if (checkbox && checkbox.checked) {
+                        map[sourceId] = {
+                            allowed: true,
+                            groups: btn._selectedGroups || []
+                        };
+                    } else {
+                        // Implicitly not allowed, but if we want to save "blocked", we can.
+                        // For now, if not in map, it's not allowed.
+                    }
+                });
+                return map;
+            })()
         };
         if (!body.password) delete body.password; // Don't send empty password if not changing
 
@@ -1253,6 +1694,20 @@ export function setupSettingsEventListeners() {
             closeModal(UIElements.userEditorModal);
             refreshUserList(); // Refresh the list on success
             showNotification(`User ${id ? 'updated' : 'added'} successfully.`);
+
+            // --- FIX: Auto-refresh if current user was updated ---
+            console.log('[DEBUG_REFRESH] Checking for auto-refresh...');
+            console.log('[DEBUG_REFRESH] Edited User ID:', id);
+            console.log('[DEBUG_REFRESH] Current User State:', appState.currentUser);
+            if (appState.currentUser) console.log('[DEBUG_REFRESH] Current User ID:', appState.currentUser.id);
+
+            if (id && appState.currentUser && String(appState.currentUser.id) === String(id)) {
+                console.log('[DEBUG_REFRESH] User match! Triggering reload.');
+                showNotification('Your settings have changed. Reloading application...', 'info', 2000);
+                setTimeout(() => window.location.reload(), 2000);
+            } else {
+                console.log('[DEBUG_REFRESH] User mismatch or missing data. No reload.');
+            }
         } else if (res) {
             // Display specific error from backend if available
             const data = await res.json().catch(() => ({ error: 'An unknown error occurred.' }));
@@ -1273,7 +1728,7 @@ export function setupSettingsEventListeners() {
             // This ensures we have the latest data, though refreshUserList usually covers it.
             // For simplicity, we can rely on the data used to render the table if refreshUserList is called often.
             // Let's assume refreshUserList keeps the UI consistent for now.
-            const res = await apiFetch('/api/users'); // Re-fetch all users to find the one clicked
+            const res = await apiFetch(`/api/users?t=${Date.now()}`); // Re-fetch all users to find the one clicked
             if (!res) return;
             const users = await res.json();
             const user = users.find(u => u.id == userId); // Use == for potential type difference
@@ -1359,70 +1814,8 @@ export function setupSettingsEventListeners() {
         e.target.value = '';
     });
 
-    // --- Group Filter Modal Interaction Logic (Inside Settings Listeners) ---
-    let tempSelectedGroups = new Set(); // Stores group names temporarily while modal is open
-
-
-    // Helper function (ensure this is accessible, maybe defined outside setupSettingsEventListeners)
-    const populateGroupFilterModal = (allGroups, selectedGroups) => {
-        tempSelectedGroups.clear(); // Clear previous temporary selections
-        selectedGroups.forEach(group => tempSelectedGroups.add(group)); // Initialize with current selections
-        const groups = { live: [], movie: [], series: [] };
-        const lowerCaseSelected = new Set(selectedGroups.map(g => g.toLowerCase()));
-
-        // Categorize groups
-        allGroups.forEach(group => {
-            const gLower = group.toLowerCase();
-            if (gLower.includes('movie') || gLower.includes('film') || gLower.includes('vod')) {
-                groups.movie.push(group);
-            } else if (gLower.includes('series') || gLower.includes('show') || gLower.includes('tv')) {
-                groups.series.push(group);
-            } else {
-                groups.live.push(group);
-            }
-        });
-
-        // Store categorized groups on the modal element
-        UIElements.groupFilterModal.dataset.groups = JSON.stringify(groups);
-
-        // Set counts on tabs
-        UIElements.groupFilterTabLive.textContent = `Live (${groups.live.length})`;
-        UIElements.groupFilterTabMovies.textContent = `VOD - Movies (${groups.movie.length})`;
-        UIElements.groupFilterTabSeries.textContent = `VOD - Series (${groups.series.length})`;
-
-        // Trigger rendering for the default "live" tab, passing the original case selected groups
-        updateGroupFilterList('live', Array.from(tempSelectedGroups)); // Use temp set
-        // Ensure the 'live' tab is visually active
-        UIElements.groupFilterTabLive.classList.add('active');
-        UIElements.groupFilterTabMovies.classList.remove('active');
-        UIElements.groupFilterTabSeries.classList.remove('active');
-        // Clear search
-        UIElements.groupFilterSearch.value = '';
-    };
-
-    // Helper function (ensure this is accessible)
-    const updateGroupFilterList = (type, selectedGroups, searchTerm = '') => {
-        const listEl = UIElements.groupFilterList;
-        const allCategorizedGroups = JSON.parse(UIElements.groupFilterModal.dataset.groups || '{}');
-        const groupsForType = allCategorizedGroups[type] || [];
-        const lowerCaseSearch = searchTerm.toLowerCase();
-        // Keep track of originally selected groups case-insensitively for checking
-        const lowerCaseSelected = new Set(selectedGroups.map(g => g.toLowerCase()));
-        const re = new RegExp(searchTerm, 'g');
-        const filteredGroups = groupsForType.filter(g => g.match(re));
-        const currentSelectedSet = new Set(selectedGroups);
-
-        if (filteredGroups.length === 0) {
-            listEl.innerHTML = `<p class="text-gray-500 col-span-full text-center">No groups found for this type${searchTerm ? ' matching "' + searchTerm + '"' : ''}.</p>`;
-            return;
-        }
-
-        listEl.innerHTML = filteredGroups.map(group => `
-            <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
-                ${group}
-            </div>
-        `).join('');
-    };
+    // --- Group Filter Modal Interaction Logic ---
+    // Note: Helper functions are now in module scope.
 
     // Listeners FOR the Group Filter Modal itself
     UIElements.groupFilterModal.addEventListener('click', (e) => {
@@ -1432,92 +1825,164 @@ export function setupSettingsEventListeners() {
         }
     });
 
-    const switchGroupFilterTab = (type) => {
-
-        // Update tempSelectedGroups based on the currently displayed tab BEFORE switching
-        const currentListItems = UIElements.groupFilterList.querySelectorAll('.group-filter-item');
-        currentListItems.forEach(item => {
-            const groupName = item.dataset.groupName;
-            if (item.classList.contains('selected')) {
-                tempSelectedGroups.add(groupName);
-            } else {
-                tempSelectedGroups.delete(groupName); // Ensure deselected items are removed
-            }
-        });
-        UIElements.groupFilterTabLive.classList.toggle('active', type === 'live');
-        UIElements.groupFilterTabMovies.classList.toggle('active', type === 'movie');
-        UIElements.groupFilterTabSeries.classList.toggle('active', type === 'series');
-        // Get currently selected groups *using their data attribute*
-        const selectedGroups = Array.from(UIElements.groupFilterList.querySelectorAll('.group-filter-item.selected')).map(el => el.dataset.groupName);
-        updateGroupFilterList(type, Array.from(tempSelectedGroups), UIElements.groupFilterSearch.value);
-    };
     UIElements.groupFilterTabLive.addEventListener('click', () => switchGroupFilterTab('live'));
     UIElements.groupFilterTabMovies.addEventListener('click', () => switchGroupFilterTab('movie'));
     UIElements.groupFilterTabSeries.addEventListener('click', () => switchGroupFilterTab('series'));
 
     UIElements.groupFilterSearch.addEventListener('input', () => {
-        const activeTab = document.querySelector('.group-filter-tab-btn.active').dataset.type;
-        const selectedGroups = Array.from(UIElements.groupFilterList.querySelectorAll('.group-filter-item.selected')).map(el => el.dataset.groupName);
-        updateGroupFilterList(activeTab, selectedGroups, UIElements.groupFilterSearch.value);
+        // Safe check for active tab
+        const activeTabEl = document.querySelector('#group-filter-list').previousElementSibling?.querySelector('.active');
+        // Actually we can infer active tab from known state or DOM classes.
+        // The implementation of switchGroupFilterTab updates classes on UIElements.groupFilterTab*.
+        let activeTab = 'live';
+        if (UIElements.groupFilterTabMovies.classList.contains('active')) activeTab = 'movie';
+        else if (UIElements.groupFilterTabSeries.classList.contains('active')) activeTab = 'series';
+
+        // We need to pass the CURRENT selections to updateGroupFilterList to maintain 'selected' class
+        updateGroupFilterList(activeTab, Array.from(tempSelectedGroups), UIElements.groupFilterSearch.value);
     });
 
     UIElements.groupFilterSelectAll.addEventListener('click', () => {
-        UIElements.groupFilterList.querySelectorAll('.group-filter-item').forEach(el => el.classList.add('selected'));
+        UIElements.groupFilterList.querySelectorAll('.group-filter-item').forEach(el => {
+            el.classList.add('selected');
+            tempSelectedGroups.add(el.dataset.groupName);
+        });
     });
     UIElements.groupFilterDeselectAll.addEventListener('click', () => {
-        UIElements.groupFilterList.querySelectorAll('.group-filter-item').forEach(el => el.classList.remove('selected'));
+        UIElements.groupFilterList.querySelectorAll('.group-filter-item').forEach(el => {
+            el.classList.remove('selected');
+            tempSelectedGroups.delete(el.dataset.groupName);
+        });
     });
 
     UIElements.groupFilterCancelBtn.addEventListener('click', () => closeModal(UIElements.groupFilterModal));
     UIElements.groupFilterCloseBtn.addEventListener('click', () => closeModal(UIElements.groupFilterModal));
 
     UIElements.groupFilterSaveBtn.addEventListener('click', () => {
-        // --- START MODIFICATION ---
-        // Update tempSelectedGroups one last time from the currently visible tab
-        // This ensures selections made just before clicking save are captured.
+        // Sync final state from DOM to Set
         const currentListItems = UIElements.groupFilterList.querySelectorAll('.group-filter-item');
         currentListItems.forEach(item => {
             const groupName = item.dataset.groupName;
             if (item.classList.contains('selected')) {
-                tempSelectedGroups.add(groupName); // Add if selected
+                tempSelectedGroups.add(groupName);
             } else {
-                tempSelectedGroups.delete(groupName); // Remove if not selected on the CURRENT tab
+                tempSelectedGroups.delete(groupName);
             }
         });
 
-        // Use the complete temporary set for saving
         const finalSelectedGroups = Array.from(tempSelectedGroups);
-        // --- END MODIFICATION ---
-
-        // Get the hidden input field in the source editor modal
-        const hiddenInput = document.getElementById('source-editor-selected-groups');
-        if (hiddenInput) {
-            // --- MODIFIED: Save finalSelectedGroups (the complete set from all tabs) ---
-            hiddenInput.value = JSON.stringify(finalSelectedGroups);
-            // --- END MODIFICATION ---
-            console.log('[SETTINGS] Saving selected groups:', finalSelectedGroups);
+        if (currentGroupEditorContext === 'user-editor') {
+            const triggerBtn = UIElements.groupFilterModal._triggerBtn;
+            if (triggerBtn) {
+                triggerBtn._selectedGroups = finalSelectedGroups;
+                const count = finalSelectedGroups.length;
+                triggerBtn.textContent = count > 0 ? `${count} Groups` : 'All Groups';
+            }
         } else {
-            console.error('[SETTINGS] Could not find hidden input #source-editor-selected-groups to save selections.');
-        }
+            // Source Editor Context
+            const sourceEditorInput = document.getElementById('source-editor-selected-groups');
+            if (sourceEditorInput) {
+                sourceEditorInput.value = JSON.stringify(finalSelectedGroups);
+            }
 
-        // Update the text on the "Select Groups" button in the source editor
-        const filterButton = document.getElementById('source-editor-filter-groups-btn');
-        const btnSpan = filterButton ? filterButton.querySelector('span') : null; // Target the inner span
-        if (btnSpan) {
-            // --- MODIFIED: Use finalSelectedGroups.length ---
-            const count = finalSelectedGroups.length;
-            const btnText = count > 0 ? `${count} Groups Selected` : 'Select Groups';
-            // --- END MODIFICATION ---
-            btnSpan.textContent = btnText; // Update the span's text
-            console.log(`[SETTINGS] Updated filter button text to: "${btnText}"`);
-        } else {
-            console.error('[SETTINGS] Could not find span within #source-editor-filter-groups-btn to update text.');
+            const btnSpan = document.querySelector('#source-editor-filter-groups-btn span');
+            if (btnSpan) {
+                const count = finalSelectedGroups.length;
+                btnSpan.textContent = count > 0 ? `${count} Groups Selected` : 'Select Groups';
+            }
         }
 
         // Close the group filter modal
         closeModal(UIElements.groupFilterModal);
     });
 
+
+    // --- NEW: User Group Filter Modal Listeners ---
+    // These are parallel to the source editor group filter listeners but target the dedicated user modal
+    const userGroupFilterTabs = {
+        'live': document.getElementById('user-group-filter-tab-live'),
+        'movie': document.getElementById('user-group-filter-tab-movies'),
+        'series': document.getElementById('user-group-filter-tab-series')
+    };
+
+    Object.keys(userGroupFilterTabs).forEach(type => {
+        const tab = userGroupFilterTabs[type];
+        if (tab) {
+            tab.addEventListener('click', () => {
+                switchUserGroupFilterTab(type);
+            });
+        }
+    });
+
+    const userGroupSearch = document.getElementById('user-group-filter-search');
+    if (userGroupSearch) {
+        userGroupSearch.addEventListener('input', (e) => {
+            const activeTab = document.querySelector('.user-group-filter-tab-btn.active');
+            let type = 'live';
+            if (activeTab) type = activeTab.dataset.type;
+            updateUserGroupFilterList(type, Array.from(tempSelectedGroups), e.target.value);
+        });
+    }
+
+    const userSelectAllBtn = document.getElementById('user-group-filter-select-all');
+    if (userSelectAllBtn) {
+        userSelectAllBtn.addEventListener('click', () => {
+            const currentListItems = document.getElementById('user-group-filter-list').querySelectorAll('.group-filter-item');
+            currentListItems.forEach(item => {
+                item.classList.add('selected');
+                tempSelectedGroups.add(item.dataset.groupName);
+            });
+        });
+    }
+
+    const userDeselectAllBtn = document.getElementById('user-group-filter-deselect-all');
+    if (userDeselectAllBtn) {
+        userDeselectAllBtn.addEventListener('click', () => {
+            const currentListItems = document.getElementById('user-group-filter-list').querySelectorAll('.group-filter-item');
+            currentListItems.forEach(item => {
+                item.classList.remove('selected');
+                tempSelectedGroups.delete(item.dataset.groupName);
+            });
+        });
+    }
+
+    const userGroupList = document.getElementById('user-group-filter-list');
+    if (userGroupList) {
+        userGroupList.addEventListener('click', (e) => {
+            const item = e.target.closest('.group-filter-item');
+            if (item) {
+                item.classList.toggle('selected');
+                const groupName = item.dataset.groupName;
+                if (item.classList.contains('selected')) {
+                    tempSelectedGroups.add(groupName);
+                } else {
+                    tempSelectedGroups.delete(groupName);
+                }
+            }
+        });
+    }
+
+    document.getElementById('user-group-filter-close-btn')?.addEventListener('click', () => closeModal(document.getElementById('user-group-filter-modal')));
+    document.getElementById('user-group-filter-cancel-btn')?.addEventListener('click', () => closeModal(document.getElementById('user-group-filter-modal')));
+
+    document.getElementById('user-group-filter-save-btn')?.addEventListener('click', () => {
+        // Sync final state from DOM to Set (User Context)
+        // Although we updated tempSelectedGroups on click, we can do a final pass or just trust the Set.
+        // We'll trust the Set as we maintained it.
+        const finalSelectedGroups = Array.from(tempSelectedGroups);
+
+        // This is ONLY for User Editor
+        const modal = document.getElementById('user-group-filter-modal');
+        const triggerBtn = modal._triggerBtn;
+        if (triggerBtn) {
+            triggerBtn._selectedGroups = finalSelectedGroups;
+            const count = finalSelectedGroups.length;
+            triggerBtn.textContent = count > 0 ? `${count} Groups` : 'All Groups';
+        }
+
+        closeModal(modal);
+    });
+    // --- END NEW LISTENERS ---
 
     // --- CORRECTED: Group Filter Button Listener (Attached on Modal Open) ---
     // Store the original function if it exists (assuming openSourceEditor is defined globally or imported)
