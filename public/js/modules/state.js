@@ -138,4 +138,7 @@ export const UIElements = {
     logAutoDeleteDaysInput: null,
     downloadLogsBtn: null,
     clearLogsBtn: null,
+
+    // --- NEW: User Editor Elements ---
+    userEditorSourceList: null,
 };
