@@ -2649,43 +2649,76 @@
     </div>
 
     <div id="user-editor-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-        <div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-md p-6">
+        <div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl p-6">
             <h3 id="user-editor-title" class="text-xl font-bold text-white mb-4">Edit User</h3>
             <form id="user-editor-form" class="space-y-4">
                 <input type="hidden" id="user-editor-id">
                 <div id="user-editor-error"
                     class="hidden bg-red-900/50 border border-red-700/50 text-red-300 px-4 py-2 rounded-md text-sm">
                 </div>
-                <div>
-                    <label for="user-editor-username" class="block text-sm font-medium text-gray-400">Username</label>
-                    <input type="text" id="user-editor-username"
-                        class="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
-                        required>
-                </div>
-                <div>
-                    <label for="user-editor-password" class="block text-sm font-medium text-gray-400">New Password
-                        (optional)</label>
-                    <input type="password" id="user-editor-password"
-                        class="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white">
-                </div>
-                <div class="flex items-center gap-6">
-                    <div class="flex items-center">
-                        <input id="user-editor-isAdmin" type="checkbox"
-                            class="h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
-                        <label for="user-editor-isAdmin" class="ml-2 block text-sm text-gray-300">Is
-                            Administrator</label>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="space-y-4">
+                        <div>
+                            <label for="user-editor-username"
+                                class="block text-sm font-medium text-gray-400">Username</label>
+                            <input type="text" id="user-editor-username"
+                                class="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500"
+                                required>
+                        </div>
+                        <div>
+                            <label for="user-editor-password"
+                                class="block text-sm font-medium text-gray-400">Password</label>
+                            <input type="password" id="user-editor-password" placeholder="Leave blank to keep current"
+                                class="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div class="flex items-center justify-between pt-2">
+                            <div class="flex items-center">
+                                <input id="user-editor-isAdmin" type="checkbox"
+                                    class="h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
+                                <label for="user-editor-isAdmin"
+                                    class="ml-2 block text-sm text-gray-300">Administrator</label>
+                            </div>
+                        </div>
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center">
+                                <input id="user-editor-canUseDvr" type="checkbox"
+                                    class="h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
+                                <label for="user-editor-canUseDvr" class="ml-2 block text-sm text-gray-300">Allow DVR
+                                    Usage</label>
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex items-center">
-                        <input id="user-editor-canUseDvr" type="checkbox"
-                            class="h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
-                        <label for="user-editor-canUseDvr" class="ml-2 block text-sm text-gray-300">Can use DVR</label>
+
+                    <div class="border-l border-gray-700 pl-6">
+                        <h4 class="text-sm font-medium text-gray-300 mb-2">Access Control</h4>
+                        <p class="text-xs text-gray-500 mb-3">Restrict access to specific sources. Unchecked sources are
+                            hidden.</p>
+                        <div
+                            class="bg-gray-900/50 rounded-md p-2 h-64 overflow-y-auto custom-scrollbar border border-gray-700">
+                            <table class="w-full text-left border-collapse">
+                                <thead
+                                    class="text-xs text-gray-400 uppercase border-b border-gray-700 sticky top-0 bg-gray-900/90 backdrop-blur-sm">
+                                    <tr>
+                                        <th class="px-3 py-2 text-center w-16">Active</th>
+                                        <th class="px-3 py-2">Source Name</th>
+                                        <th class="px-3 py-2 text-right">Groups</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="user-editor-source-list" class="text-sm divide-y divide-gray-700/50">
+                                    <!-- Dynamic Source List -->
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
-                <div class="flex justify-end gap-4 pt-4">
+
+                <div class="flex justify-end gap-4 pt-4 border-t border-gray-700">
                     <button type="button" id="user-editor-cancel-btn"
                         class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md">Cancel</button>
-                    <button type="submit"
-                        class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Save</button>
+                    <button type="submit" id="user-editor-save-btn"
+                        class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Save
+                        User</button>
                 </div>
             </form>
         </div>
@@ -2812,6 +2845,50 @@
         </div>
     </div>
 
+    <!-- NEW: Dedicated User Group Filter Modal to prevent conflicts -->
+    <div id="user-group-filter-modal"
+        class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[65] p-4">
+        <div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-3xl flex flex-col" style="height: 80vh;">
+            <div class="p-4 border-b border-gray-700 flex-shrink-0 flex justify-between items-center">
+                <h3 class="text-xl font-bold text-white">User Access Group Filter</h3>
+                <button type="button" id="user-group-filter-close-btn"
+                    class="text-gray-400 hover:text-white p-2 rounded-full text-2xl">&times;</button>
+            </div>
+            <div class="p-4 flex-shrink-0 border-b border-gray-700">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div class="flex space-x-1 sm:space-x-4">
+                        <button id="user-group-filter-tab-live" data-type="live"
+                            class="user-group-filter-tab-btn tab-button active">Live</button>
+                        <button id="user-group-filter-tab-movies" data-type="movie"
+                            class="user-group-filter-tab-btn tab-button">VOD - Movies</button>
+                        <button id="user-group-filter-tab-series" data-type="series"
+                            class="user-group-filter-tab-btn tab-button">VOD - Series</button>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="user-group-filter-select-all"
+                            class="bg-gray-700 hover:bg-gray-600 text-white text-sm font-bold py-2 px-3 rounded-md">Select
+                            All</button>
+                        <button id="user-group-filter-deselect-all"
+                            class="bg-gray-700 hover:bg-gray-600 text-white text-sm font-bold py-2 px-3 rounded-md">Deselect
+                            All</button>
+                    </div>
+                </div>
+                <input type="search" id="user-group-filter-search" placeholder="Filter groups..."
+                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500 mt-4">
+            </div>
+            <div id="user-group-filter-list"
+                class="p-4 flex-grow overflow-y-auto custom-scrollbar grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            </div>
+            <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4 rounded-b-lg flex-shrink-0">
+                <button type="button" id="user-group-filter-cancel-btn"
+                    class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md">Cancel</button>
+                <button type="button" id="user-group-filter-save-btn"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Save and
+                    Close</button>
+            </div>
+        </div>
+    </div>
+
     <div id="vod-details-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-4">
         <div id="vod-details-container" class="bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl flex flex-col relative"
             style="max-height: 90vh;">
@@ -2874,7 +2951,7 @@
     </div>
 
 
-    <script type="module" src="/js/main.js"></script>
+    <script type="module" src="/js/main.js?v=2"></script>
 
     <div id="processing-status-modal"
         class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[70] p-4">
