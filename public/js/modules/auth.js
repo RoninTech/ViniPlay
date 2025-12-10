@@ -32,6 +32,7 @@ const initializeUIElements = () => {
     UIElements.channelColumnResizeHandle = document.getElementById('channel-column-resize-handle');
     UIElements.userDisplay = document.getElementById('user-display');
     UIElements.userManagementSection = document.getElementById('user-management-section');
+    UIElements.userEditorSourceList = document.getElementById('user-editor-source-list');
     // NOTE: dvrSettingsSection is the entire settings div, not a separate element. Logic will handle visibility.
 
 
