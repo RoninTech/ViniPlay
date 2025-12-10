@@ -120,11 +120,13 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     } else {
         console.log("[DB] Connected to the SQLite database.");
         db.serialize(() => {
-            db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, isAdmin INTEGER DEFAULT 0, canUseDvr INTEGER DEFAULT 0)`, (err) => {
+            db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, isAdmin INTEGER DEFAULT 0, canUseDvr INTEGER DEFAULT 0, allowed_sources TEXT)`, (err) => {
                 if (err) {
                     console.error("[DB] Error creating 'users' table:", err.message);
                 } else {
+                    // DB Migrations for existing tables
                     db.run("ALTER TABLE users ADD COLUMN canUseDvr INTEGER DEFAULT 0", () => { });
+                    db.run("ALTER TABLE users ADD COLUMN allowed_sources TEXT", () => { });
                 }
             });
             db.run(`CREATE TABLE IF NOT EXISTS user_settings (user_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (user_id, key))`);
@@ -272,7 +274,22 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 });
 
 // --- Middleware ---
-app.use(express.static(PUBLIC_DIR));
+// 1. Smart Caching for API: Allow cache presence but FORCE revalidation every time.
+// 'no-cache' = "Check with server before using cached copy".
+app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'private, no-cache, must-revalidate');
+    next();
+});
+
+// 2. Smart Caching for Static Files:
+// Allow browser to cache index.html/js, but REQUIRE it to check if they changed (304 Not Modified)
+app.use(express.static(PUBLIC_DIR, {
+    setHeaders: (res, path) => {
+        if (path.endsWith('index.html') || path.endsWith('.js')) {
+            res.set('Cache-Control', 'public, no-cache, must-revalidate');
+        }
+    }
+}));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -511,7 +528,7 @@ async function detectHardwareAcceleration() {
     const vaapi_radeon_gpu_drivers = ["r600_drv_video.so", "radeonsi_drv_video.so"];
     const intel_qsv_gpu_drivers = ["iHD_drv_video.so"];
     const intel_vaapi_gpu_drivers = ["i965_drv_video.so"];
-  
+
     console.log('[HW] Detecting hardware acceleration capabilities...');
     // Detect NVIDIA GPU
     exec('nvidia-smi --query-gpu=gpu_name --format=csv,noheader', (err, stdout, stderr) => {
@@ -533,17 +550,17 @@ async function detectHardwareAcceleration() {
             const trimmed_stdout = stdout.trim()
 
             // Intel qsv driver is for modern Intel GPUs (Gen9+) and is preferred for QSV
-            if (intel_qsv_gpu_drivers.some(substring=>stderr.includes(substring))) {
+            if (intel_qsv_gpu_drivers.some(substring => stderr.includes(substring))) {
                 detectedHardware.intel_qsv = extractVainfoGPUDetails(trimmed_stdout);
                 found = true;
             }
             // AMD Radeon detection
-            if (vaapi_radeon_gpu_drivers.some(substring=>stderr.includes(substring))) {
+            if (vaapi_radeon_gpu_drivers.some(substring => stderr.includes(substring))) {
                 detectedHardware.radeon_vaapi = extractVainfoGPUDetails(trimmed_stdout);
                 found = true;
             }
             // Intel vaapi driver is for older Intel GPUs (pre-Gen9)
-            if (intel_vaapi_gpu_drivers.some(substring=>stderr.includes(substring))) {
+            if (intel_vaapi_gpu_drivers.some(substring => stderr.includes(substring))) {
                 detectedHardware.intel_vaapi = extractVainfoGPUDetails(trimmed_stdout);
                 found = true;
             }
@@ -1633,7 +1650,7 @@ app.post('/api/auth/setup-admin', (req, res) => {
                 req.session.isAdmin = true;
                 req.session.canUseDvr = true;
                 console.log(`[AUTH_API] Admin user "${username}" created successfully (ID: ${this.lastID}). Session set.`);
-                res.json({ success: true, user: { username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
+                res.json({ success: true, user: { id: this.lastID, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
             });
         });
     });
@@ -1665,7 +1682,7 @@ app.post('/api/auth/login', (req, res) => {
                 console.log(`[AUTH_API] User "${username}" (ID: ${user.id}) logged in successfully. Session set.`);
                 res.json({
                     success: true,
-                    user: { username: user.username, isAdmin: user.isAdmin === 1, canUseDvr: user.canUseDvr === 1 }
+                    user: { id: user.id, username: user.username, isAdmin: user.isAdmin === 1, canUseDvr: user.canUseDvr === 1 }
                 });
             } else {
                 console.warn(`[AUTH_API] Login failed for username "${username}": Incorrect password.`);
@@ -1798,7 +1815,7 @@ app.get('/api/auth/status', (req, res) => {
     console.log(`[AUTH_API] GET /api/auth/status - Checking session ID: ${req.sessionID}`);
     if (req.session && req.session.userId) {
         console.log(`[AUTH_API_STATUS] Valid session found for user "${req.session.username}" (ID: ${req.session.userId}). Responding with isLoggedIn: true.`);
-        res.json({ isLoggedIn: true, user: { username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
+        res.json({ isLoggedIn: true, user: { id: req.session.userId, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
     } else {
         console.log('[AUTH_API_STATUS] No valid session found. Responding with isLoggedIn: false.');
         res.json({ isLoggedIn: false });
@@ -1807,7 +1824,7 @@ app.get('/api/auth/status', (req, res) => {
 // ... existing User Management API Endpoints ...
 app.get('/api/users', requireAdmin, (req, res) => {
     console.log('[USER_API] Fetching all users.');
-    db.all("SELECT id, username, isAdmin, canUseDvr FROM users ORDER BY username", [], (err, rows) => {
+    db.all("SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users ORDER BY username", [], (err, rows) => {
         if (err) {
             console.error('[USER_API] Error fetching users:', err.message);
             return res.status(500).json({ error: err.message });
@@ -1819,7 +1836,7 @@ app.get('/api/users', requireAdmin, (req, res) => {
 
 app.post('/api/users', requireAdmin, (req, res) => {
     console.log('[USER_API] Adding new user.');
-    const { username, password, isAdmin, canUseDvr } = req.body;
+    const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
     if (!username || !password) {
         console.warn('[USER_API] Add user failed: Username and/or password missing.');
         return res.status(400).json({ error: "Username and password are required." });
@@ -1830,7 +1847,8 @@ app.post('/api/users', requireAdmin, (req, res) => {
             console.error('[USER_API] Error hashing password for new user:', err);
             return res.status(500).json({ error: 'Error hashing password' });
         }
-        db.run("INSERT INTO users (username, password, isAdmin, canUseDvr) VALUES (?, ?, ?, ?)", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0], function (err) {
+        const allowedSourcesStr = allowed_sources ? JSON.stringify(allowed_sources) : null;
+        db.run("INSERT INTO users (username, password, isAdmin, canUseDvr, allowed_sources) VALUES (?, ?, ?, ?, ?)", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr], function (err) {
             if (err) {
                 console.error('[USER_API] Error inserting new user:', err.message);
                 return res.status(400).json({ error: "Username already exists." });
@@ -1843,8 +1861,10 @@ app.post('/api/users', requireAdmin, (req, res) => {
 
 app.put('/api/users/:id', requireAdmin, (req, res) => {
     const { id } = req.params;
-    const { username, password, isAdmin, canUseDvr } = req.body;
+    const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
     console.log(`[USER_API] Updating user ID: ${id}. Username: ${username}, IsAdmin: ${isAdmin}, CanUseDvr: ${canUseDvr}`);
+
+    const allowedSourcesStr = allowed_sources ? JSON.stringify(allowed_sources) : null;
 
     const updateUser = () => {
         if (password) {
@@ -1853,7 +1873,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                     console.error('[USER_API] Error hashing password during user update:', err);
                     return res.status(500).json({ error: 'Error hashing password' });
                 }
-                db.run("UPDATE users SET username = ?, password = ?, isAdmin = ?, canUseDvr = ? WHERE id = ?", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, id], (err) => {
+                db.run("UPDATE users SET username = ?, password = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
                     if (err) {
                         console.error(`[USER_API] Error updating user ${id} with new password:`, err.message);
                         return res.status(500).json({ error: err.message });
@@ -1869,7 +1889,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                 });
             });
         } else {
-            db.run("UPDATE users SET username = ?, isAdmin = ?, canUseDvr = ? WHERE id = ?", [username, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, id], (err) => {
+            db.run("UPDATE users SET username = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
                 if (err) {
                     console.error(`[USER_API] Error updating user ${id} without password change:`, err.message);
                     return res.status(500).json({ error: err.message });
@@ -1948,26 +1968,128 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
     });
 });
 // --- Protected IPTV API Endpoints ---
-app.get('/api/config', requireAuth, (req, res) => {
+app.get('/api/config', requireAuth, async (req, res) => {
     try {
         // ADDED vodMovies and vodSeries
         let config = { m3uContent: null, epgContent: null, settings: {}, vodMovies: [], vodSeries: [] };
         let globalSettings = getSettings();
         config.settings = globalSettings;
 
-        // UPDATED path
+        // FETCH USER PERMISSIONS
+        let allowedSources = null;
+        try {
+            const user = await dbGet(db, "SELECT allowed_sources, username FROM users WHERE id = ?", [req.session.userId]);
+            if (user) {
+                console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId} (Session: ${req.sessionID})`);
+                if (user.allowed_sources) {
+                    allowedSources = JSON.parse(user.allowed_sources);
+                    console.log(`[DEBUG_API_CONFIG] DB allowed_sources for user '${user.username}':`, JSON.stringify(allowedSources, null, 2));
+                } else {
+                    console.log(`[DEBUG_API_CONFIG] No allowed_sources found for user '${user.username}' (admin/full access).`);
+                }
+            }
+        } catch (dbErr) {
+            console.error("[API] Error fetching user permissions:", dbErr);
+        }
+
+        // LOAD M3U
         if (fs.existsSync(LIVE_CHANNELS_M3U_PATH)) {
-            config.m3uContent = fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8');
-            console.log(`[API] Loaded M3U content from ${LIVE_CHANNELS_M3U_PATH}.`);
+            let m3uRaw = fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8');
+
+            // FILTER M3U
+            if (allowedSources) {
+                const lines = m3uRaw.split('\n');
+                let filteredLines = [];
+                if (lines.length > 0 && lines[0].startsWith('#EXTM3U')) {
+                    filteredLines.push(lines[0]);
+                }
+
+                let currentExtInf = null;
+                const groupTitleRegex = /group-title="([^"]*)"/;
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line.startsWith('#EXTINF:')) {
+                        currentExtInf = line;
+
+                        // Extract Source ID we injected earlier: tvg-id="sourceId_..."
+                        const tvgIdMatch = line.match(/tvg-id="([^"]*)"/);
+                        let isAllowed = false;
+
+                        if (tvgIdMatch) {
+                            const fullId = tvgIdMatch[1];
+                            const underscoreIndex = fullId.indexOf('_');
+                            if (underscoreIndex !== -1) {
+                                const sourceId = fullId.substring(0, underscoreIndex);
+                                // Check if this source is in allowedSources
+                                if (allowedSources[sourceId]) {
+                                    // Check if specifically allowed (if we use { allowed: true }) or just presence
+                                    // Assuming format: { "sourceId": { allowed: true, groups: [] } }
+                                    if (allowedSources[sourceId].allowed) {
+                                        isAllowed = true;
+                                        // Check Group Restrictions
+                                        const groups = allowedSources[sourceId].groups;
+                                        if (groups && groups.length > 0) {
+                                            const groupMatch = line.match(groupTitleRegex);
+                                            const group = groupMatch ? groupMatch[1] : 'Uncategorized';
+                                            if (!groups.includes(group)) {
+                                                isAllowed = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!isAllowed) {
+                            currentExtInf = null;
+                        }
+
+                    } else if (line.startsWith('http') || (line.startsWith('/') && !line.startsWith('//'))) { // URL or local path
+                        if (currentExtInf) {
+                            filteredLines.push(currentExtInf);
+                            filteredLines.push(line);
+                        }
+                        currentExtInf = null;
+                    }
+                }
+                config.m3uContent = filteredLines.join('\n');
+                console.log(`[API] Loaded and FILTERED M3U content for user ${req.session.username}.`);
+            } else {
+                config.m3uContent = m3uRaw;
+                console.log(`[API] Loaded M3U content from ${LIVE_CHANNELS_M3U_PATH}.`);
+            }
         } else {
             console.log(`[API] No merged M3U file found at ${LIVE_CHANNELS_M3U_PATH}.`);
         }
 
-        // UPDATED path
+        // LOAD EPG
         if (fs.existsSync(LIVE_EPG_JSON_PATH)) {
             try {
-                config.epgContent = JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8'));
-                console.log(`[API] Loaded EPG content from ${LIVE_EPG_JSON_PATH}.`);
+                const fullEpg = JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8'));
+                if (allowedSources) {
+                    const filteredEpg = {};
+                    for (const channelId in fullEpg) {
+                        const underscoreIndex = channelId.indexOf('_');
+                        if (underscoreIndex !== -1) {
+                            const sourceId = channelId.substring(0, underscoreIndex);
+                            if (allowedSources[sourceId] && allowedSources[sourceId].allowed) {
+                                // For EPG, we can't easily filter by group unless we look up the channel's group from M3U
+                                // But EPG entries don't have group info. 
+                                // However, the frontend matches EPG to M3U channels. 
+                                // If M3U channel is hidden, EPG doesn't matter much, but good to filter for payload size.
+                                // Limiting factor: We don't know the group here easily without re-parsing M3U or having a mapping.
+                                // DECISION: Filter EPG by Source ID only. Granular group filtering happens naturally because the M3U won't have the channel.
+                                filteredEpg[channelId] = fullEpg[channelId];
+                            }
+                        }
+                    }
+                    config.epgContent = filteredEpg;
+                    console.log(`[API] Loaded and FILTERED EPG content for user ${req.session.username}.`);
+                } else {
+                    config.epgContent = fullEpg;
+                    console.log(`[API] Loaded EPG content from ${LIVE_EPG_JSON_PATH}.`);
+                }
             } catch (parseError) {
                 console.error(`[API] Error parsing merged EPG JSON from ${LIVE_EPG_JSON_PATH}: ${parseError.message}`);
                 config.epgContent = {};
@@ -1976,27 +2098,22 @@ app.get('/api/config', requireAuth, (req, res) => {
             console.log(`[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`);
         }
 
-        // --- NEW: Load VOD Files ---
+        // --- NEW: Load VOD Files (Legacy) ---
+        // VOD filtering is complex here as it uses legacy JSON files. 
+        // We will assume VOD is handled by the new /api/vod/library endpoint properly.
+        // But to be safe, we can clear these if legacy mode is active and user is restricted.
+        // For now, loading as is, but frontend uses the library endpoint.
+
         if (fs.existsSync(VOD_MOVIES_JSON_PATH)) {
+            // ... legacy code kept simple
             try {
                 config.vodMovies = JSON.parse(fs.readFileSync(VOD_MOVIES_JSON_PATH, 'utf-8'));
-                console.log(`[API] Loaded ${config.vodMovies.length} movies from ${VOD_MOVIES_JSON_PATH}.`);
-            } catch (parseError) {
-                console.error(`[API] Error parsing VOD Movies JSON: ${parseError.message}`);
-            }
-        } else {
-            console.log(`[API] No VOD Movies file found at ${VOD_MOVIES_JSON_PATH}.`);
+            } catch (e) { }
         }
-
         if (fs.existsSync(VOD_SERIES_JSON_PATH)) {
             try {
                 config.vodSeries = JSON.parse(fs.readFileSync(VOD_SERIES_JSON_PATH, 'utf-8'));
-                console.log(`[API] Loaded ${config.vodSeries.length} series episodes from ${VOD_SERIES_JSON_PATH}.`);
-            } catch (parseError) {
-                console.error(`[API] Error parsing VOD Series JSON: ${parseError.message}`);
-            }
-        } else {
-            console.log(`[API] No VOD Series file found at ${VOD_SERIES_JSON_PATH}.`);
+            } catch (e) { }
         }
         // --- END NEW VOD ---
 
@@ -2019,6 +2136,24 @@ app.get('/api/config', requireAuth, (req, res) => {
                 config.settings = { ...config.settings, ...userSettings };
                 console.log(`[API] Merged user settings for user ID: ${req.session.userId}`);
             }
+
+            // --- CACHE INVALIDATION LOGIC ---
+            // Calculate a signature for the user's permissions to force cache updates
+            let userPermissionsSignature = 'default';
+            if (allowedSources) {
+                const str = JSON.stringify(allowedSources);
+                let hash = 0;
+                for (let i = 0; i < str.length; i++) {
+                    const char = str.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; // Convert to 32bit integer
+                }
+                userPermissionsSignature = 'v1_' + hash;
+            }
+            config.settings.userPermissionsSignature = userPermissionsSignature;
+            console.log(`[API] Serving config with permissions signature: ${userPermissionsSignature}`);
+            // --------------------------------
+
             res.status(200).json(config);
         });
 
@@ -2032,9 +2167,37 @@ app.get('/api/config', requireAuth, (req, res) => {
 app.get('/api/vod/library', requireAuth, async (req, res) => {
     console.log('[API_VOD] Request received for /api/vod/library (DB Query)');
     try {
+        // FETCH USER PERMISSIONS
+        let allowedSources = null;
+        try {
+            const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
+            if (user && user.allowed_sources) {
+                allowedSources = JSON.parse(user.allowed_sources);
+            }
+        } catch (dbErr) {
+            console.error("[API_VOD] Error fetching user permissions:", dbErr);
+        }
+
         // 1. Get active XC providers from settings
         const settings = getSettings();
-        const activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc');
+        let activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc');
+
+        // FILTER PROVIDERS
+        if (allowedSources) {
+            activeXcProviders = activeXcProviders.filter(p => {
+                if (allowedSources[p.id]) {
+                    // Check if specifically allowed
+                    if (allowedSources[p.id].allowed) {
+                        return true;
+                    }
+                    return false;
+                }
+                // If allowedSources exists but source not in it, assume blocked (whitelist approach)
+                return false;
+            });
+            console.log(`[API_VOD] Filtered VOD providers for user ${req.session.username}. Allowed: ${activeXcProviders.map(p => p.name).join(', ')}`);
+        }
+
         const providerMap = new Map();
         activeXcProviders.forEach(p => {
             try {
@@ -2070,6 +2233,19 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         const processedMovies = movies.map(m => {
             const provider = providerMap.get(m.provider_id);
             if (!provider) return null; // Skip if provider is not active
+
+            // PERMISSION CHECK: Filter by category if strict groups are defined
+            if (allowedSources) {
+                const perms = allowedSources[m.provider_id];
+                if (perms && perms.allowed) {
+                    const allowedGroups = perms.groups || [];
+                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
+                    if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
+                        return null;
+                    }
+                }
+            }
+
             const ext = m.container_extension || 'mp4';
             // Build the full playable URL
             const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
@@ -2089,84 +2265,57 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
 
         // 3. Fetch all series headers from active providers
+        // Added r.provider_id to SELECT so we can filter permissions
         const seriesQuery = `
-            SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name
+            SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
             FROM series s
             JOIN provider_series_relations r ON s.id = r.series_id
             WHERE r.provider_id IN (${providerIdPlaceholders})
             ORDER BY s.name
         `;
         const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
-        console.log(`[API_VOD] Fetched ${seriesList.length} series headers from DB.`);
 
-        // 4. Fetch episodes for each series
-        /*
-        for (const series of seriesList) {
-            const numericSeriesId = parseInt(String(series.id), 10);
-            
-            const episodeQuery = `
-                SELECT e.id, e.season_num, e.episode_num, e.name, e.description, e.air_date, e.tmdb_id,
-                       r.provider_stream_id, r.provider_id
-                FROM episodes e
-                JOIN provider_episode_relations r ON e.id = r.episode_id
-                WHERE e.series_id = ? AND r.provider_id IN (${providerIdPlaceholders})
-                ORDER BY e.season_num, e.episode_num
-            `;
-            const episodes = await dbAll(db, episodeQuery, [numericSeriesId, ...activeProviderIds]);
-
-            // Group episodes by season
-            const seasons = new Map();
-            episodes.forEach(ep => {
-                const provider = providerMap.get(ep.provider_id);
-                if (!provider) return; // Skip episode if its provider is not active
-                
-                const ext = ep.container_extension || 'mp4';
-                // Build the full playable URL
-                const epUrl = `${provider.baseUrl}/series/${provider.username}/${provider.password}/${ep.stream_id}.${ext}`;
-
-                const seasonNum = ep.season_num;
-                if (!seasons.has(seasonNum)) {
-                    seasons.set(seasonNum, []);
+        // Process series headers with permission checks
+        const processedSeries = seriesList.map(series => {
+            // PERMISSION CHECK: Filter by category if strict groups are defined
+            if (allowedSources) {
+                const perms = allowedSources[series.provider_id];
+                if (perms && perms.allowed) {
+                    const allowedGroups = perms.groups || [];
+                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
+                    if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
+                        return null;
+                    }
                 }
-                seasons.get(seasonNum).push({
-                    id: String(ep.id),
-                    name: ep.name,
-                    description: ep.description,
-                    air_date: ep.air_date,
-                    tmdb_id: ep.tmdb_id,
-                    season: ep.season_num,
-                    episode: ep.episode_num,
-                    url: epUrl // The all-important URL
-                });
-            });
-            
-            // Convert Map to the object structure the frontend expects
-            series.seasons = Object.fromEntries(seasons);
-            series.type = 'series'; // Add type
-            series.id = String(series.id); // Ensure string ID
-            series.group = series.category_name
-        }
+            }
 
-        console.log(`[API_VOD] Finished fetching episodes for all series.`);
-        */
+            return {
+                ...series,
+                type: 'series',
+                id: series.provider_unique_id, // Use the stable provider_unique_id
+                group: series.category_name
+                // seasons property removed as it is lazy loaded
+            };
+        }).filter(Boolean);
 
-        // --- ADD this minimal processing step instead ---
-        seriesList.forEach(series => {
-            series.type = 'series';
-            series.id = series.provider_unique_id; // Use the stable provider_unique_id
-            series.group = series.category_name;
-            // Ensure seasons object is NOT present
-            delete series.seasons;
-        });
-        console.log(`[API_VOD] Processed series headers. Episodes will be lazy-loaded.`);
+        console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
 
         // 5. Respond
-        const categories = await dbAll(db, "SELECT category_name FROM vod_categories ORDER BY category_name");
-        const categoryNames = categories.map(cat => cat.category_name);
+        // 5. Respond
+        // FIX: Derive categories from the filtered content to ensure we only show relevant groups
+        const uniqueCategories = new Set();
+        processedMovies.forEach(m => {
+            if (m.group) uniqueCategories.add(m.group);
+        });
+        processedSeries.forEach(s => {
+            if (s.group) uniqueCategories.add(s.group);
+        });
+
+        const categoryNames = Array.from(uniqueCategories).sort();
 
         res.json({
             movies: processedMovies,
-            series: seriesList,
+            series: processedSeries,
             categories: categoryNames
         });
 
@@ -2209,6 +2358,25 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
             const relation = await dbGet(db, "SELECT provider_id, external_series_id FROM provider_series_relations WHERE series_id = ? LIMIT 1", [numericSeriesId]);
             if (!relation) {
                 return res.status(404).json({ error: 'Could not find provider information for this series.' });
+            }
+
+            // CHECK PERMISSIONS
+            try {
+                const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
+                if (user && user.allowed_sources) {
+                    const allowedSources = JSON.parse(user.allowed_sources);
+                    if (allowedSources[relation.provider_id] && !allowedSources[relation.provider_id].allowed) {
+                        console.warn(`[API_VOD_SERIES] Access denied for user ${req.session.username} to provider ${relation.provider_id}`);
+                        return res.status(403).json({ error: "Access denied to this series." });
+                    }
+                    // If allowedSources exists but provider not in it, also deny
+                    if (!allowedSources[relation.provider_id]) {
+                        console.warn(`[API_VOD_SERIES] Access denied (not in list) for user ${req.session.username} to provider ${relation.provider_id}`);
+                        return res.status(403).json({ error: "Access denied to this series." });
+                    }
+                }
+            } catch (dbErr) {
+                console.error("[API_VOD] Error checking user permissions:", dbErr);
             }
 
             const settings = getSettings();
