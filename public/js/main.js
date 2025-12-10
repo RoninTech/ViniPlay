@@ -202,16 +202,26 @@ export async function initMainApp() {
         UIElements.initialLoadingIndicator.classList.remove('hidden');
         UIElements.guidePlaceholder.classList.remove('hidden');
 
-        // FIX: Cache Validation Logic
+        // FIX: Cache Validation Logic including User Permissions
         const serverTimestamp = config.settings.sourcesLastUpdated;
         const localTimestamp = await loadDataFromDB('sourcesLastUpdated');
+
+        // NEW: Check User Permission Signature to invalidate cache if permissions change
+        const serverUserSig = config.settings.userPermissionsSignature || 'default';
+        const localUserSig = await loadDataFromDB('userPermissionsSignature');
+
         let useCache = false;
 
-        if (serverTimestamp && localTimestamp && serverTimestamp === localTimestamp) {
-            console.log('[MAIN_CACHE] Server and local timestamps match. Using local cache.');
+        // Condition 1: Global Source Content hasn't changed
+        const sourceMatch = serverTimestamp && localTimestamp && serverTimestamp === localTimestamp;
+        // Condition 2: User Permissions haven't changed
+        const sigMatch = serverUserSig && localUserSig && serverUserSig === localUserSig;
+
+        if (sourceMatch && sigMatch) {
+            console.log('[MAIN_CACHE] Server/Local timestamps match AND User Permissions match. Using local cache.');
             useCache = true;
         } else {
-            console.log(`[MAIN_CACHE] Timestamps differ or are missing. Server: ${serverTimestamp}, Local: ${localTimestamp}. Fetching fresh data.`);
+            console.log(`[MAIN_CACHE] Cache invalid. SourceMatch: ${sourceMatch} (${serverTimestamp} vs ${localTimestamp}), SigMatch: ${sigMatch} (${serverUserSig} vs ${localUserSig}). Fetching fresh data.`);
             useCache = false;
         }
 
@@ -233,9 +243,10 @@ export async function initMainApp() {
             if (config.m3uContent) {
                 console.log('[MAIN] Processing guide data from server config.');
                 await handleGuideLoad(config.m3uContent, config.epgContent);
-                // After successfully loading from server, update the local timestamp.
+                // After successfully loading from server, update the local timestamp and signature.
                 await saveDataToDB('sourcesLastUpdated', serverTimestamp);
-                console.log('[MAIN_CACHE] Updated local timestamp to match server.');
+                await saveDataToDB('userPermissionsSignature', serverUserSig);
+                console.log('[MAIN_CACHE] Updated local timestamp and permission signature to match server.');
             } else {
                 console.log('[MAIN] No M3U content from server or cache. Displaying no data message.');
                 UIElements.initialLoadingIndicator.classList.add('hidden');
